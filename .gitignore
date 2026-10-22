@@ -1,0 +1,13 @@
+# Environments, caches and build output
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+build/
+dist/
+*.egg-info/
+# Local conversation state and task artifacts
+.local/
+state/
+runs/
+*.sock
