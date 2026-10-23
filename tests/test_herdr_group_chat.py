@@ -502,7 +502,7 @@ class GroupChatTests(unittest.TestCase):
         h.finish("codex")
         h.finish("claude")
         h.wait(lambda: SAFE in h.output, "safe notice after both native turns ended")
-        self.assertEqual(h.ctl("/resume"), "resumed")
+        self.assertEqual(h.ctl("/resume"), "resumed", h.output)
         h.wait(h.idle, "all done")
         time.sleep(0.5)
         self.assertEqual(len(h.prompts()), 5)  # no own/old echo, no duplicate or extra native turn
@@ -936,7 +936,7 @@ class GroupChatTests(unittest.TestCase):
         h.set_status("claude", "working")  # woken natively while the chat is paused
         self.assertIn("paused or stopped, and rejoining does not resume it", self.rejoin(tok1).stdout)
         h.set_status("claude", "idle")
-        self.assertEqual(h.ctl("/resume"), "resumed")
+        self.assertEqual(h.ctl("/resume"), "resumed", h.output)
         self.assertIn("not working in a native turn", self.rejoin(tok1).stdout)
         h.set_status("claude", "working")
         self.assertIn("was not issued", self.rejoin("t1-claude-forged").stdout)
@@ -958,7 +958,7 @@ class GroupChatTests(unittest.TestCase):
         self.assertEqual(len(h.events("rejoin")), 1)
         self.assertIn("NOT safe", h.ctl("/pause"))  # the callback turn is tracked
         self.assertIn("a group turn is active", h.ctl("/exit"))
-        self.assertEqual(h.ctl("/resume"), "resumed")
+        self.assertEqual(h.ctl("/resume"), "resumed", h.output)
         self.assertEqual(h.claim(tok).returncode, 0)  # its receipt credits #3
         h.submit(tok, "a4")
         h.finish("claude")
@@ -986,7 +986,7 @@ class GroupChatTests(unittest.TestCase):
         h.newest("claude", 3)
         h.ctl("/interrupt")
         h.wait(lambda: "INTERRUPTED (Esc)" in h.output, "both stopped")
-        self.assertEqual(h.ctl("/resume"), "resumed")
+        self.assertEqual(h.ctl("/resume"), "resumed", h.output)
         return h, c1, a1
 
     def seen(self, agent):
@@ -1094,7 +1094,7 @@ class GroupChatTests(unittest.TestCase):
         self.assertIn("paused or stopped", self.rejoin(h.token(a1)).stdout)
         h.set_status("claude", "idle")
         self.assertIn("skipped", h.ctl("/skip"))
-        self.assertEqual(h.ctl("/resume"), "resumed")
+        self.assertEqual(h.ctl("/resume"), "resumed", h.output)
         time.sleep(0.5)
         self.assertEqual(len(h.prompts()), 2)  # nothing resent
 
@@ -1281,7 +1281,7 @@ class GroupChatTests(unittest.TestCase):
         self.assertIn("no longer hosts the bound session", h.ctl("/resume"))
         agents[PANES["claude"]]["agent_session"]["value"] = "sess-claude"
         (h.fake / "agents.json").write_text(json.dumps(agents))
-        self.assertEqual(h.ctl("/resume"), "resumed")
+        self.assertEqual(h.ctl("/resume"), "resumed", h.output)
         a2 = h.agent_prompts("claude", 2)[1]
         self.assertEqual(seqs(a2), [2])
         h.ctl("/pause")  # a current evaluation claiming while paused is refused and asked again later
@@ -1349,7 +1349,7 @@ class GroupChatTests(unittest.TestCase):
         h.ctl("q2")  # accepted while stopped: queued, nothing dispatched or re-asked
         time.sleep(0.5)
         self.assertEqual((len(h.prompts()), [m["text"] for m in h.transcript()], h.status()["queued"]), (2, ["q1"], 1))
-        self.assertEqual(h.ctl("/resume"), "resumed")
+        self.assertEqual(h.ctl("/resume"), "resumed", h.output)
         c2, a2 = h.agent_prompts("codex", 2)[1], h.agent_prompts("claude", 2)[1]
         self.assertEqual((seqs(c2), seqs(a2)), ([2], [1, 2]))  # Claude's uncredited #1 rides with its next input
         self.assertEqual(len(self.keys()), 2)
@@ -1371,7 +1371,7 @@ class GroupChatTests(unittest.TestCase):
         h.ctl("/interrupt")  # only Codex works: Esc reaches it alone
         h.wait(lambda: not h.status()["halting"] and not h.status()["tasks"], "Codex stopped")
         self.assertEqual([k["pane"] for k in self.keys()], [PANES["codex"]])
-        self.assertEqual(h.ctl("/resume"), "resumed")
+        self.assertEqual(h.ctl("/resume"), "resumed", h.output)
         time.sleep(0.5)
         self.assertEqual(len(h.prompts()), 1)
 
@@ -1479,7 +1479,7 @@ class GroupChatTests(unittest.TestCase):
         h.wait(lambda: h.status()["hold"], "error hold")
         self.assertIn("coordinator error", h.status()["hold"])
         (h.fake / "bad-get").unlink()
-        self.assertEqual(h.ctl("/resume"), "resumed")
+        self.assertEqual(h.ctl("/resume"), "resumed", h.output)
         c1, a1 = h.agent_prompts("codex", 1)[0], h.agent_prompts("claude", 1)[0]  # each dispatched once
         (h.fake / "bad-get").write_text("1")  # errors after sending: Claude's update and Codex's end
         h.post(c1, "c")
@@ -1623,7 +1623,7 @@ class GroupChatTests(unittest.TestCase):
         h.wait(lambda: "codex" not in h.status()["tasks"], "Codex's end")
         h.set_status("claude", "idle")
         self.assertIn("skipped", h.ctl("/skip"))
-        self.assertEqual(h.ctl("/resume"), "resumed")
+        self.assertEqual(h.ctl("/resume"), "resumed", h.output)
         h.reboot(2)
         time.sleep(0.5)
         self.assertEqual((h.status()["due"], len(h.prompts())), ([], 1))  # the skipped evaluation is not revived
