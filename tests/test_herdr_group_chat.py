@@ -20,6 +20,13 @@ import time
 import unicodedata
 import unittest
 
+
+def put(path, text):
+    """Atomic write: the fake Herdr's processes read these files concurrently and must never see a truncated one."""
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    tmp.write_text(text)
+    os.replace(tmp, path)
+
 # The installed module (src/ is not on sys.path), run as a script like the agents' generated commands.
 SCRIPT = Path(importlib.util.find_spec("herdr_group_chat").origin).resolve()
 PANES = {"codex": "w9:p1", "claude": "w9:p2"}
@@ -39,6 +46,8 @@ import fcntl, json, os, sys, time
 from pathlib import Path
 D = Path(os.environ["FAKE_HERDR_DIR"])
 def key(p): return p.replace(":", "_")
+def put(path, text):  # atomic: a concurrent reader never sees a truncated file
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp"); tmp.write_text(text); os.replace(tmp, path)
 def info(p):
     a = dict(json.loads((D / "agents.json").read_text())[p])
     status, lag = (D / f"status-{key(p)}").read_text(), D / f"lag-{key(p)}"
@@ -59,7 +68,7 @@ def settle(p, timeout_ms, until=None):
             return 1
         if f.exists():
             try:
-                (D / f"status-{key(p)}").write_text(f.read_text()); f.unlink()
+                put(D / f"status-{key(p)}", f.read_text()); f.unlink()
             except FileNotFoundError:  # another waiter took it
                 pass
         now = info(p)
@@ -91,8 +100,8 @@ if a[:2] == ["pane", "split"]:
     ok({"pane": {"pane_id": new_pane(), "tab_id": "w9:t1"}})
 if a[:2] == ["pane", "move"]:  # the agent keeps its identity under the new pane id
     agents, new = json.loads((D / "agents.json").read_text()), new_pane()
-    agents[new] = agents.pop(a[2]); (D / "agents.json").write_text(json.dumps(agents))
-    (D / f"status-{key(new)}").write_text((D / f"status-{key(a[2])}").read_text())
+    agents[new] = agents.pop(a[2]); put(D / "agents.json", json.dumps(agents))
+    put(D / f"status-{key(new)}", (D / f"status-{key(a[2])}").read_text())
     ok({"move_result": {"pane": {"pane_id": new}}})
 if a[:2] in (["pane", "swap"], ["pane", "run"], ["pane", "focus"]):
     ok({"type": "ok"})
@@ -115,7 +124,7 @@ if a[:2] == ["agent", "start"]:
         if resumed:
             agents[pane]["agent_session"] = {"value": None if kind == "codex" else session}
             agents[pane]["reveal"] = session
-        (D / "agents.json").write_text(json.dumps(agents)); (D / f"status-{key(pane)}").write_text("idle")
+        put(D / "agents.json", json.dumps(agents)); put(D / f"status-{key(pane)}", "idle")
     ok({"agent": info(pane)})
 if a[:2] == ["agent", "get"] and (D / "slow-get").exists():  # holds a dispatch before it sends
     time.sleep(1.5)
@@ -128,7 +137,7 @@ if a[:2] == ["pane", "close"]:
     if (D / "close-fail").exists():
         print(json.dumps({"error": {"code": "internal", "message": "close failed"}}), file=sys.stderr); sys.exit(1)
     agents = json.loads((D / "agents.json").read_text())
-    agents.pop(a[2], None); (D / "agents.json").write_text(json.dumps(agents))
+    agents.pop(a[2], None); put(D / "agents.json", json.dumps(agents))
     ok({"type": "ok"})
 if a[:2] == ["agent", "get"]:
     print(json.dumps({"result": {"agent": info(a[2])}})); sys.exit(0)
@@ -142,7 +151,7 @@ if a[:2] == ["agent", "send-keys"]:
     with (D / "keys.jsonl").open("a") as f:
         f.write(json.dumps({"pane": a[2], "keys": a[3:], "status": status, "time": time.time()}) + "\n")
     if a[3:] == ["esc"] and status == "working" and not (D / f"esc-ignored-{key(a[2])}").exists():
-        (D / f"status-{key(a[2])}").write_text("idle")
+        put(D / f"status-{key(a[2])}", "idle")
     ok({"type": "ok"})
 if a[:2] == ["agent", "prompt"]:
     if "--wait" not in a and (D / "slow-update").exists():
@@ -150,18 +159,18 @@ if a[:2] == ["agent", "prompt"]:
     agents = json.loads((D / "agents.json").read_text())
     if "reveal" in agents[a[2]]:  # its first turn starts: Herdr learns the session id now
         agents[a[2]]["agent_session"] = {"value": agents[a[2]].pop("reveal")}
-        (D / "agents.json").write_text(json.dumps(agents))
+        put(D / "agents.json", json.dumps(agents))
     before = info(a[2])
     with (D / "prompts.jsonl").open("a") as f:
         f.write(json.dumps({"pane": a[2], "text": a[3], "time": time.time(), "wait": "--wait" in a}) + "\n")
     if "--wait" in a:
-        (D / f"status-{key(a[2])}").write_text("working")
+        put(D / f"status-{key(a[2])}", "working")
         sys.exit(settle(a[2], timeout))
     if (D / f"prompt-fail-{key(a[2])}").exists():  # written, but the CLI reports a failure
         print(json.dumps({"error": {"code": "timeout", "message": "no reply"}}), file=sys.stderr); sys.exit(1)
     if before["agent_status"] != "working":  # the input starts a new native turn, seen late
-        (D / f"lag-{key(a[2])}").write_text(json.dumps([time.time() + 0.4, before["agent_status"]]))
-        (D / f"status-{key(a[2])}").write_text("working")
+        put(D / f"lag-{key(a[2])}", json.dumps([time.time() + 0.4, before["agent_status"]]))
+        put(D / f"status-{key(a[2])}", "working")
     ok({"agent": before, "type": "agent_prompted"})
 if a[:2] == ["agent", "wait"]:
     until = [a[i + 1] for i, x in enumerate(a) if x == "--until"]
@@ -186,7 +195,7 @@ class Harness:
         herdr.chmod(0o755)
         ident = {a: {"agent": a, "agent_session": {"value": f"sess-{a}"}, "terminal_id": f"term-{a}",
                      "workspace_id": "w9", "tab_id": "w9:t1"} for a in PANES}
-        (self.fake / "agents.json").write_text(json.dumps({PANES[a]: ident[a] for a in PANES}))
+        put(self.fake / "agents.json", json.dumps({PANES[a]: ident[a] for a in PANES}))
         for a in PANES:
             self.set_status(a, "idle")
         self.state = self.d / "state"
@@ -201,14 +210,14 @@ class Harness:
             cfg["native_argv"] = {"codex": ["--model", "m"], "claude": ["--model", "m"]}
             cfg["identity"]["codex"]["session"] = None
             ident["codex"]["agent_session"] = {"value": None}
-            (self.fake / "agents.json").write_text(json.dumps({PANES[a]: ident[a] for a in PANES}))
+            put(self.fake / "agents.json", json.dumps({PANES[a]: ident[a] for a in PANES}))
         if pending is not None:  # natively resumed Codex session bound as pending; Herdr reveals `pending` at its first turn
             cfg["native_argv"] = {"codex": ["--model", "m"], "claude": ["--model", "m"]}
             cfg["identity"]["codex"]["pending"] = True
             ident["codex"]["agent_session"] = {"value": None}
             if pending:
                 ident["codex"]["reveal"] = pending
-            (self.fake / "agents.json").write_text(json.dumps({PANES[a]: ident[a] for a in PANES}))
+            put(self.fake / "agents.json", json.dumps({PANES[a]: ident[a] for a in PANES}))
         (self.state / "config.json").write_text(json.dumps(cfg))
         if transcript:  # pre-existing chat state (e.g. from before progress.json existed)
             (self.state / "transcript.jsonl").write_text("".join(
@@ -303,10 +312,10 @@ class Harness:
         raise AssertionError(f"timed out waiting for {what}; output:\n{self.output}")
 
     def set_status(self, agent, status):
-        (self.fake / f"status-{PANES[agent].replace(':', '_')}").write_text(status)
+        put(self.fake / f"status-{PANES[agent].replace(':', '_')}", status)
 
     def finish(self, agent, status="done"):
-        (self.fake / f"finish-{PANES[agent].replace(':', '_')}").write_text(status)
+        put(self.fake / f"finish-{PANES[agent].replace(':', '_')}", status)
 
     def prompts(self):
         p = self.fake / "prompts.jsonl"
@@ -331,7 +340,7 @@ class Harness:
         for a in PANES:
             agents[PANES[a]].update(terminal_id=f"term-{a}-{n}", pgid=300 + n)
             self.set_status(a, "idle")
-        (self.fake / "agents.json").write_text(json.dumps(agents))
+        put(self.fake / "agents.json", json.dumps(agents))
         root = self.d / "home/.local/state/herdr-group-chat"
         if not root.exists():
             root.mkdir(parents=True)
@@ -603,7 +612,7 @@ class GroupChatTests(unittest.TestCase):
     def boundary_write(self, h, agent, lag):
         """The running turn ends just as an update written while `working` arrives; that update starts a new
         native turn, which Herdr keeps reporting as the old `done` for `lag` seconds (review repro F1)."""
-        (h.fake / f"lag-{PANES[agent].replace(':', '_')}").write_text(json.dumps([time.time() + lag, "done"]))
+        put(h.fake / f"lag-{PANES[agent].replace(':', '_')}", json.dumps([time.time() + lag, "done"]))
         h.set_status(agent, "working")
 
     def boundary_setup(self, h):
@@ -944,10 +953,10 @@ class GroupChatTests(unittest.TestCase):
         self.assertIn("is not Codex's pane", self.rejoin(h.token(c1)).stdout)
         agents = json.loads((h.fake / "agents.json").read_text())
         agents[PANES["claude"]]["agent_session"]["value"] = "sess-other"
-        (h.fake / "agents.json").write_text(json.dumps(agents))
+        put(h.fake / "agents.json", json.dumps(agents))
         self.assertIn("no longer hosts the bound session", self.rejoin(tok1).stdout)
         agents[PANES["claude"]]["agent_session"]["value"] = "sess-claude"
-        (h.fake / "agents.json").write_text(json.dumps(agents))
+        put(h.fake / "agents.json", json.dumps(agents))
         self.assertEqual(h.events("rejoin"), [])
         r = self.rejoin(tok1)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
@@ -1182,7 +1191,7 @@ class GroupChatTests(unittest.TestCase):
         def codex_session(h, value):
             agents = json.loads((h.fake / "agents.json").read_text())
             agents[PANES["codex"]]["agent_session"] = {"value": value}
-            (h.fake / "agents.json").write_text(json.dumps(agents))
+            put(h.fake / "agents.json", json.dumps(agents))
 
         def late_id_state(h, value, events=""):
             """Real start: config.json keeps Codex's session null; Codex reports `value` later."""
@@ -1277,10 +1286,10 @@ class GroupChatTests(unittest.TestCase):
         h.set_status("claude", "idle")
         agents = json.loads((h.fake / "agents.json").read_text())
         agents[PANES["claude"]]["agent_session"]["value"] = "sess-replaced"
-        (h.fake / "agents.json").write_text(json.dumps(agents))
+        put(h.fake / "agents.json", json.dumps(agents))
         self.assertIn("no longer hosts the bound session", h.ctl("/resume"))
         agents[PANES["claude"]]["agent_session"]["value"] = "sess-claude"
-        (h.fake / "agents.json").write_text(json.dumps(agents))
+        put(h.fake / "agents.json", json.dumps(agents))
         self.assertEqual(h.ctl("/resume"), "resumed", h.output)
         a2 = h.agent_prompts("claude", 2)[1]
         self.assertEqual(seqs(a2), [2])
@@ -1383,7 +1392,7 @@ class GroupChatTests(unittest.TestCase):
         (h.fake / f"esc-ignored-{PANES['codex'].replace(':', '_')}").write_text("")
         agents = json.loads((h.fake / "agents.json").read_text())
         agents[PANES["claude"]]["agent_session"]["value"] = "sess-replaced"
-        (h.fake / "agents.json").write_text(json.dumps(agents))
+        put(h.fake / "agents.json", json.dumps(agents))
         h.ctl("/interrupt")
         self.assertIn("already interrupting", h.ctl("/interrupt"))  # a repeated Esc starts no second round
         self.assertIn("still stopping", h.ctl("/resume"))
@@ -1467,7 +1476,7 @@ class GroupChatTests(unittest.TestCase):
         h.wait(lambda: "claude" not in h.status()["tasks"], "Claude's end")
         agents = json.loads((h.fake / "agents.json").read_text())
         agents[PANES["claude"]]["pgid"] = 200  # agent restarted in the same pane
-        (h.fake / "agents.json").write_text(json.dumps(agents))
+        put(h.fake / "agents.json", json.dumps(agents))
         self.assertIn("no longer hosts the bound session", h.ctl("/resume"))
         self.assertEqual(len(h.prompts()), 3)
         self.assertIn("STOPPED", h.output)
@@ -1875,7 +1884,7 @@ class GroupChatTests(unittest.TestCase):
             h = self.h = Harness(tmp, owned=True)
             agents = json.loads((h.fake / "agents.json").read_text())
             agents[PANES["codex"]]["pgid"] = 200  # another process now occupies Codex's pane
-            (h.fake / "agents.json").write_text(json.dumps(agents))
+            put(h.fake / "agents.json", json.dumps(agents))
             (h.fake / "close-fail").write_text("")
             self.assertIn("not exited: Codex pane", h.ctl("/exit"))
             h.line("/exit!")
@@ -1902,7 +1911,7 @@ class StartTests(unittest.TestCase):
         self.herdr = self.d / "herdr"
         self.herdr.write_text(f"#!{sys.executable}\n" + FAKE_HERDR)
         self.herdr.chmod(0o755)
-        (self.fake / "agents.json").write_text("{}")
+        put(self.fake / "agents.json", "{}")
         (self.fake / "pane-count").write_text("1")
         # New panes n1 (left) and n2 (right) sit above the caller w9:p0 after split + swap + split.
         self.layout({"w9:n1": (0, 0, 87, 36), "w9:n2": (87, 0, 86, 36), "w9:p0": (0, 36, 173, 16)})
@@ -1969,8 +1978,8 @@ class StartTests(unittest.TestCase):
     def test_invalid_start_context_fails_before_any_mutation(self):
         cases = {
             "only one legacy pane": (lambda: None, ("--codex", "w9:x"), "pass both"),
-            "agent tool shell": (lambda: (self.fake / "agents.json").write_text(
-                json.dumps({"w9:p0": {"agent": "codex"}})), (), "hosts codex"),
+            "agent tool shell": (lambda: put(self.fake / "agents.json", json.dumps({"w9:p0": {"agent": "codex"}})),
+                                 (), "hosts codex"),
             "not foreground": (lambda: (self.fake / "not-foreground").write_text(""), (), "not the foreground"),
             "occupied tab": (lambda: (self.fake / "pane-count").write_text("3"), (), "has 3 panes"),
             "used state dir": (lambda: (self.state.mkdir(), (self.state / "config.json").write_text("{}")),
@@ -2024,9 +2033,9 @@ class StartTests(unittest.TestCase):
             agents = {p: {"agent": a, "agent_session": {"value": s}, "terminal_id": f"term-{a}-new", "pgid": 300,
                           "workspace_id": "w9", "tab_id": "w9:t1"}
                       for p, a, s in (("w9:a", "codex", "sess-codex"), ("w9:b", "claude", claude_session))}
-            (self.fake / "agents.json").write_text(json.dumps(agents))
+            put(self.fake / "agents.json", json.dumps(agents))
             for p in agents:
-                (self.fake / f"status-{p.replace(':', '_')}").write_text("idle")
+                put(self.fake / f"status-{p.replace(':', '_')}", "idle")
             (self.fake / "pane-count").write_text("3")
 
         def unchanged(state):
@@ -2205,7 +2214,7 @@ class StartTests(unittest.TestCase):
         self.assertIn("GRANTED", run("claim", "--socket", sock, "--turn", token, pane="w9:n1").stdout)
         self.assertIn("received as group message #14", run("submit", "--socket", sock, "--turn", token,
                                                            stdin="c14\n", pane="w9:n1").stdout)
-        (self.fake / "finish-w9_n1").write_text("done")
+        put(self.fake / "finish-w9_n1", "done")
         until(lambda: "turn_end" in [e["kind"] for e in events()], "turn end")
         self.assertEqual([e["session"] for e in events() if e["kind"] == "session_confirmed"], ["sess-codex"])
         self.assertNotIn("pending", json.loads((state / "config.json").read_text())["identity"]["codex"])
@@ -2248,7 +2257,7 @@ class StartTests(unittest.TestCase):
         ctl("/ask codex u13")  # Codex's reconstructed cursor (its own last message #10) carries #11-#13
         until(lambda: (self.fake / "prompts.jsonl").exists(), "Codex prompt")
         self.assertEqual([int(n) for n in re.findall(r"^=== #(\d+) ", prompts()[0]["text"], re.M)], [11, 12, 13])
-        (self.fake / "finish-w9_n1").write_text("done")
+        put(self.fake / "finish-w9_n1", "done")
         until(lambda: "turn_end" in [e["kind"] for e in events()], "turn end")
         self.assertEqual([e["session"] for e in events() if e["kind"] == "session_confirmed"], ["sess-codex"])
         self.assertIn("closed Codex pane w9:n1 and Claude Code pane w9:n2", ctl("/exit"))
@@ -2258,9 +2267,9 @@ class StartTests(unittest.TestCase):
 
     def test_resume_refuses_open_running_duplicate_unrecorded_or_failed_groups_without_changes(self):
         def live(agents):
-            (self.fake / "agents.json").write_text(json.dumps(agents))
+            put(self.fake / "agents.json", json.dumps(agents))
             for p in agents:
-                (self.fake / f"status-{p.replace(':', '_')}").write_text("idle")
+                put(self.fake / f"status-{p.replace(':', '_')}", "idle")
 
         def hold(state):  # a coordinator owns the group
             self.held = open(state / "coordinator.lock", "a")
@@ -2310,9 +2319,9 @@ class StartTests(unittest.TestCase):
     def test_legacy_binding_with_both_panes_still_works(self):
         agents = {p: {"agent": a, "agent_session": {"value": f"sess-{a}"}, "terminal_id": f"term-{a}",
                       "workspace_id": "w9", "tab_id": "w9:t1"} for p, a in (("w9:a", "codex"), ("w9:b", "claude"))}
-        (self.fake / "agents.json").write_text(json.dumps(agents))
+        put(self.fake / "agents.json", json.dumps(agents))
         for p in agents:
-            (self.fake / f"status-{p.replace(':', '_')}").write_text("idle")
+            put(self.fake / f"status-{p.replace(':', '_')}", "idle")
         self.layout({"w9:a": (0, 0, 87, 36), "w9:n2": (87, 0, 86, 36), "w9:n1": (0, 36, 173, 16)})
         r = self.start("--codex", "w9:a", "--claude", "w9:b")
         self.assertEqual(r.returncode, 0, r.stderr)
