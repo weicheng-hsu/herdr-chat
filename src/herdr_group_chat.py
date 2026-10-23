@@ -310,7 +310,7 @@ class Chat:
         return msg
 
     def show(self, msg):
-        name = "你" if msg["author"] == "user" else LABELS.get(msg["author"], msg["author"])
+        name = "You" if msg["author"] == "user" else LABELS.get(msg["author"], msg["author"])
         header = (tint(f"── {name}", "1", self.color)
                   + tint(f"  #{msg['seq']} · {stamp(msg['time'])} ──", "2", self.color))
         rail = tint("│ ", "2", self.color)
@@ -970,17 +970,19 @@ Group-chat protocol (external wrapper):
             agents = []
             for a in AGENTS:
                 t = self.tasks.get(a)
-                state = "閒置" if t is None else "持有發言權" if self.owner is t else "評估中"
-                agents.append(f"{LABELS[a]} {state}" + ("（已停住）" if t and not t["running"] else ""))
+                state = "idle" if t is None else "holding the slot" if self.owner is t else "evaluating"
+                agents.append(f"{LABELS[a]} {state}" + (" (stopped)" if t and not t["running"] else ""))
             if self.halting:
-                flow = "Esc 中斷中：等待 " + "、".join(LABELS[a] for a in AGENTS if a in self.halting) + " 停止"
+                flow = ("Esc: waiting for " + ", ".join(LABELS[a] for a in AGENTS if a in self.halting)
+                        + " to stop")
             elif self.hold:
-                flow = "已停住：/resume 或 /skip"
+                flow = "stopped: /resume or /skip"
             elif self.paused:
-                flow = "暫停中，原生輸入尚不安全" if self.native_busy() else "已暫停，無群組回合（/pause 檢查原生輸入）"
+                flow = ("pausing, native input not safe yet" if self.native_busy()
+                        else "paused, no group turn (/pause checks native input)")
             else:
-                flow = "執行中"
-            return " │ ".join([*agents, f"待處理使用者訊息 {len(self.queue)}", flow])
+                flow = "running"
+            return " │ ".join([*agents, f"{len(self.queue)} queued", flow])
 
     def command(self, line):
         line = line.rstrip("\n")
@@ -1210,18 +1212,18 @@ Group-chat protocol (external wrapper):
 
 # entry points ------------------------------------------------------------------
 # Slash menu: the existing commands only. A choice fills the draft; Enter then executes it.
-COMMANDS = (("/help", "/help", "完整說明"),
-            ("/status", "/status", "詳細狀態"),
-            ("/history", "/history [N]", "重顯公開紀錄（N：只看最近 N 則）"),
-            ("/ask codex ", "/ask codex MESSAGE", "只讓 Codex 回覆這則公開訊息"),
-            ("/ask claude ", "/ask claude MESSAGE", "只讓 Claude Code 回覆這則公開訊息"),
-            ("/multi", "/multi", "多行訊息，單獨一行 /end 結束"),
-            ("/interrupt", "/interrupt", "立即中斷兩位 agent 的原生回合並暫停（同 Esc）；不重送、不重問"),
-            ("/pause", "/pause", "停止新派送與 claim；執行中的原生回合先做完"),
-            ("/resume", "/resume", "確認兩個 session 就緒且綁定後繼續"),
-            ("/skip", "/skip", "放棄已停住且 agent 閒置的回合（不重送）"),
-            ("/exit", "/exit", "結束群聊；只關閉 start 啟動的兩個 agent pane"),
-            ("/exit!", "/exit!", "agent 仍在工作也結束，會中斷其回合"))
+COMMANDS = (("/help", "/help", "full help"),
+            ("/status", "/status", "detailed status"),
+            ("/history", "/history [N]", "reprint the public transcript (N: only the last N)"),
+            ("/ask codex ", "/ask codex MESSAGE", "only Codex may answer this public message"),
+            ("/ask claude ", "/ask claude MESSAGE", "only Claude Code may answer this public message"),
+            ("/multi", "/multi", "multi-line message; end with /end on its own line"),
+            ("/interrupt", "/interrupt", "interrupt both agents now and pause (as Esc); nothing re-asked or resent"),
+            ("/pause", "/pause", "stop new dispatches and claims; running native turns finish"),
+            ("/resume", "/resume", "check both sessions are ready and bound, then continue"),
+            ("/skip", "/skip", "abandon stopped turns whose agent is idle (no resend)"),
+            ("/exit", "/exit", "end the chat; closes only the two agent panes launched by start"),
+            ("/exit!", "/exit!", "end even while agents work, interrupting their turns"))
 
 
 def toolkit_problem():
@@ -1400,8 +1402,9 @@ def line_editor(chat, color, out):
         lines.put(KeyboardInterrupt())
 
     def notice():
-        extra = f"、{log.notes} 則通知" if log.notes else ""
-        return [("bold", f" ▲ 較早內容 · 下方 {log.new} 則新訊息{extra} · PgDn 往下 · Ctrl+End 回最新 ")]
+        new = f"{log.new} new message" + "s" * (log.new != 1)
+        extra = f", {log.notes} notice" + "s" * (log.notes != 1) if log.notes else ""
+        return [("bold", f" ▲ earlier output · {new}{extra} below · PgDn down · Ctrl+End latest ")]
 
     prompt = lambda: "... " if mode[0] == "multi" else [("bold", "group> ")] if color else "group> "
     view = Window(log, wrap_lines=True)
@@ -1547,8 +1550,8 @@ def cmd_ui(args):
                 return
             kind = "system"
         if kind != "message":
-            label, code = {"system": ("系統", "2"), "warning": ("注意", "1;33"),
-                           "error": ("停止", "1;31")}[kind]
+            label, code = {"system": ("system", "2"), "warning": ("warning", "1;33"),
+                           "error": ("stopped", "1;31")}[kind]
             if kind == "system":
                 text = tint(f"[{label}] {text}", code, color)
             else:
@@ -2102,10 +2105,11 @@ def main(argv=None):
     s.add_argument("--codex-model", default="gpt-6-astra")
     s.add_argument("--claude-model", default="claude-fable-5-1")
     s.add_argument("--effort", choices=("low", "medium", "high"),
-                   help="override both agents' effort (default: Codex xhigh, Claude Code max)")
+                   help="override both agents' effort (default: Codex xhigh, Claude Code max; these defaults "
+                        "cannot be selected with this flag, omit it to keep them)")
     s.add_argument("--startup-timeout-ms", type=int, default=120_000)
     s.add_argument("--allow-submit", action="store_true",
-                   help="fresh launch: pre-allow only this wrapper's claim, submit and ack commands in Claude Code "
+                   help="fresh launch: pre-allow only this wrapper's claim, submit, ack and rejoin commands in Claude Code "
                         "(--allowedTools); by default Claude Code asks natively")
     s.add_argument("--state-dir")
     s.add_argument("--label", default="group-chat")

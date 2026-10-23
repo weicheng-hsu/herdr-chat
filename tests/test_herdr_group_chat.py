@@ -1053,7 +1053,7 @@ class GroupChatTests(unittest.TestCase):
         h.close()
         chat = load_script().Chat(h.state, lambda *a, **k: None)
         chat.paused = True  # the in-memory status line no longer asserts that native input is safe
-        self.assertNotIn("原生輸入可用", chat.status_line())
+        self.assertNotIn("may be used", chat.status_line())
 
     def test_held_unsent_turn_of_a_natively_working_session_is_never_reported_safe(self):
         h = self.start()
@@ -1111,7 +1111,7 @@ class GroupChatTests(unittest.TestCase):
         [c1] = h.agent_prompts("codex", 1)  # Codex was never prompted for q1
         self.assertEqual(seqs(c1), [1, 2, 3])
         self.assertIn("=== #1 user (asked Claude Code only) ===\nq1", c1["text"])
-        self.assertNotIn("m3", c1["text"])
+        self.assertNotIn("===\nm3", c1["text"])  # no public message "m3" (the path may hold "m3")
         time.sleep(0.5)
         self.assertEqual(len(h.agent_prompts("claude", 1)), 1)  # q2 is Codex's alone
         h.post(c1, "c2")  # plain m3 joins this release: both agents are addressed again
@@ -1754,27 +1754,27 @@ class GroupChatTests(unittest.TestCase):
         h.type("draft text")
         h.wait(lambda: "group> draft text" in h.screen(), "draft")
         h.type("\x1b[5~")  # PgUp: read older output
-        h.wait(lambda: "▲ 較早內容" in h.text(), "reading notice")
+        h.wait(lambda: "▲ earlier output" in h.text(), "reading notice")
         view = h.screen()[:-3]  # above the notice, input and status lines
         h.ctl("news-1")
         c1 = h.agent_prompts("codex", 1)[0]
         h.agent_prompts("claude", 1)
         h.post(c1, "reply-1")
-        h.wait(lambda: "下方 2 則新訊息" in h.text(), "unread count")
+        h.wait(lambda: "2 new messages" in h.text(), "unread count")
         self.assertEqual(h.screen()[:-3], view)  # nothing moved or shifted
         self.assertNotIn("reply-1", h.text())
         self.assertEqual(h.screen()[-2], "group> draft text")
         h.type("\x1b[1;5F")  # Ctrl+End: back to the latest
-        h.wait(lambda: "reply-1" in h.text() and "▲ 較早內容" not in h.text(), "latest")
+        h.wait(lambda: "reply-1" in h.text() and "▲ earlier output" not in h.text(), "latest")
         h.type("\x1b[5~")
-        h.wait(lambda: "▲ 較早內容" in h.text(), "reading again")
+        h.wait(lambda: "▲ earlier output" in h.text(), "reading again")
         h.type("\x1b[6~" * 3)  # PgDn reaching the end follows new output again
-        h.wait(lambda: "▲ 較早內容" not in h.text() and "reply-1" in h.text(), "following")
+        h.wait(lambda: "▲ earlier output" not in h.text() and "reply-1" in h.text(), "following")
         sent = len(h.prompts())
         h.type("\x15/int")  # Ctrl+U clears the draft; a slash draft opens the menu
-        h.wait(lambda: "立即中斷兩位 agent" in h.text(), "menu")
+        h.wait(lambda: "interrupt both agents now" in h.text(), "menu")
         h.type("\x1b")  # the first Esc only closes the menu
-        h.wait(lambda: "立即中斷兩位 agent" not in h.text(), "menu closed")
+        h.wait(lambda: "interrupt both agents now" not in h.text(), "menu closed")
         time.sleep(1)
         self.assertEqual((h.events("interrupt"), self.keys()), ([], []))
         h.type("\x1b")  # the next Esc interrupts both agents (still evaluating news-1)
@@ -1795,7 +1795,7 @@ class GroupChatTests(unittest.TestCase):
         wheel = lambda up, row=5: h.type(f"\x1b[<{64 if up else 65};10;{row}M")  # SGR wheel report, 1-based
         follow = h.screen()[:-2]
         wheel(True)
-        h.wait(lambda: "▲ 較早內容" in h.text(), "reading notice")
+        h.wait(lambda: "▲ earlier output" in h.text(), "reading notice")
         view = h.screen()[:-3]
         self.assertEqual(view[3:], follow[:len(view) - 3])  # three rows older, not a page
         wheel(True)
@@ -1807,12 +1807,12 @@ class GroupChatTests(unittest.TestCase):
         c1 = h.agent_prompts("codex", 1)[0]
         h.agent_prompts("claude", 1)
         h.post(c1, "reply-1")
-        h.wait(lambda: "下方 2 則新訊息" in h.text(), "unread count")
+        h.wait(lambda: "2 new messages" in h.text(), "unread count")
         self.assertEqual(h.screen()[:-3], view)  # new output keeps the place
         self.assertEqual(h.screen()[-2], "group> draft text")
         for _ in range(8):  # down until the end: following again, newest output shown
             wheel(False)
-        h.wait(lambda: "▲ 較早內容" not in h.text() and "reply-1" in h.text(), "following")
+        h.wait(lambda: "▲ earlier output" not in h.text() and "reply-1" in h.text(), "following")
         self.assertEqual(h.screen()[-2], "group> draft text")
         self.assertEqual([e["text"] for e in h.events("user_queued")], ["news-1"])  # wheel bytes sent nothing
         self.assertEqual((h.events("interrupt"), self.keys()), ([], []))

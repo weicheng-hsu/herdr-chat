@@ -1,12 +1,76 @@
 # herdr-chat
 
-A shared group chat for one Codex CLI session, one
-Claude Code session and you, running inside a
-[Herdr](https://herdr.dev) tab. Both agents keep their native terminal UIs in the
-upper left/right panes; a full-width input pane below is the group chat.
+[![tests](https://github.com/weicheng-hsu/herdr-chat/actions/workflows/test.yml/badge.svg)](https://github.com/weicheng-hsu/herdr-chat/actions/workflows/test.yml)
 
-`herdr-chat` is an external wrapper: it drives the original Herdr CLI and does not modify Herdr, Codex or
-Claude Code.
+Codex CLI and Claude Code normally run in separate windows, and you relay between them yourself: copy one
+agent's answer into the other, then carry the reply back. `herdr-chat` puts both agents and you in one group
+chat instead: each agent sees every public message, decides on its own whether to reply, and can build on or
+check the other's answer.
+
+It is an external wrapper that drives the original Herdr CLI; it does not modify Herdr, Codex or Claude Code.
+[Herdr](https://herdr.dev) is a terminal workspace manager for AI coding agents, similar to tmux or zellij: each
+agent runs in a real terminal pane inside tabs and workspaces, and its CLI lets scripts split panes, start
+agents and send them prompts.
+
+One Herdr tab holds the whole group. Both agents keep their native terminal UIs in the upper left/right panes;
+the full-width pane below is the group chat:
+
+```text
++---------------------------------+---------------------------------+
+| Codex                           | Claude Code                     |
+| (native TUI)                    | (native TUI)                    |
+|                                 |                                 |
+|                                 |                                 |
+|                                 |                                 |
++---------------------------------+---------------------------------+
+| group chat: messages, group> input line, status line              |
++-------------------------------------------------------------------+
+```
+
+The agent row gets `--ratio` of the tab height (default 0.75, so the chat pane gets the bottom quarter); the
+two agent panes split it evenly.
+
+An illustration (not a recording) of the bottom pane: you ask, Codex answers, Claude Code corrects it, and
+you then address Claude Code alone. An agent that decides not to answer posts nothing.
+
+```text
+── You  #1 · 14:02:11 ──
+│ Why is parse_date("2026-03-29T03:00") one hour off in the Berlin tests?
+
+── Codex  #2 · 14:03:40 ──
+│ It applies a fixed UTC+1 offset; Berlin switches to UTC+2 at 02:00 that day. Use zoneinfo.
+
+── Claude Code  #3 · 14:04:05 ──
+│ Right cause, but the offset is also cached at import, so the tests stay wrong until that cache goes too.
+group> /ask claude remove the cache, switch to zoneinfo and run the timezone tests
+Codex idle │ Claude Code idle │ 0 queued │ running
+```
+
+## Quick start
+
+Herdr must be installed with its server running, and the Codex CLI and Claude Code must be installed and logged in
+(see [Requirements](#requirements)).
+
+1. Install from a clone into a virtual environment:
+
+   ```bash
+   python3.11 -m venv ~/.venvs/herdr-chat
+   ~/.venvs/herdr-chat/bin/pip install /path/to/herdr-chat
+   # optional: put the command on PATH
+   ln -s ~/.venvs/herdr-chat/bin/herdr-chat ~/.local/bin/herdr-chat
+   ```
+
+2. Open a new, empty Herdr tab (one shell pane) and `cd` to the project the agents should work in.
+3. Run:
+
+   ```bash
+   herdr-chat --effort medium
+   ```
+
+   Without `--effort`, Codex runs `gpt-6-astra` at effort `xhigh` and Claude Code runs `claude-fable-5-1` at
+   `max`, the most expensive levels.
+
+Then type a message in the bottom pane; `/help` lists the commands.
 
 ## How it works
 
@@ -34,21 +98,14 @@ Python dependencies (installed automatically): `prompt-toolkit`, `rich`, `markdo
 
 ## Install
 
-From a clone, into a virtual environment of your choice:
-
-```bash
-python3.11 -m venv ~/.venvs/herdr-chat
-~/.venvs/herdr-chat/bin/pip install /path/to/herdr-chat
-# optional: put the command on PATH
-ln -s ~/.venvs/herdr-chat/bin/herdr-chat ~/.local/bin/herdr-chat
-```
-
-Agents call back the installed module with the same interpreter (`<venv>/bin/python <site-packages>/herdr_group_chat.py claim ...`),
-so keep that environment in place while a chat runs.
+[Quick start](#quick-start) step 1 installs from a clone; any virtual environment of your choice works.
+Agents call back the installed module with the same interpreter
+(`<venv>/bin/python <site-packages>/herdr_group_chat.py claim ...`), so keep that environment in place while a
+chat runs.
 
 ## Use
 
-Open a new, empty Herdr tab (one shell pane), `cd` to the project the agents should work in, and run:
+From a new, empty Herdr tab (one shell pane), in the project the agents should work in:
 
 ```bash
 herdr-chat [--effort low|medium|high] [--codex-model MODEL] [--claude-model MODEL] [--cwd DIR]
@@ -62,6 +119,8 @@ open; close them and rerun.
 - Default models are `gpt-6-astra` (Codex, effort `xhigh`) and `claude-fable-5-1` (Claude Code, effort `max`).
   These are the defaults of the original setup, not a recommendation: they must exist for your provider
   accounts. Pass `--codex-model`/`--claude-model` and `--effort` to change them. There is no model fallback.
+  `--effort` accepts only `low`, `medium` or `high` for both agents, so the default `xhigh`/`max` levels are
+  available only by omitting it.
 - By default Claude Code asks for approval before running the chat's callback commands, following its own
   permission settings. `--allow-submit` pre-allows exactly the `claim`, `submit`, `ack` and `rejoin` commands
   (`--allowedTools`).
@@ -83,8 +142,8 @@ open; close them and rerun.
 | PgUp/PgDn, mouse wheel, Ctrl+End | scroll the message view; Ctrl+End or sending returns to the latest |
 | `/exit`, `/exit!` | end the chat and close the two agent panes it launched (`/exit!` also while agents work) |
 
-Typing `/` opens a command menu (descriptions are in Traditional Chinese). An Esc with the menu open only
-closes the menu. Esc followed quickly by another key is read as Alt+key.
+Typing `/` opens a command menu. An Esc with the menu open only closes the menu. Esc followed quickly by
+another key is read as Alt+key.
 
 ### Saved groups and recovery
 
@@ -126,6 +185,9 @@ python3.11 -m venv .venv && .venv/bin/pip install .
 .venv/bin/python -m unittest tests.test_herdr_group_chat
 ```
 
+The same suite runs in GitHub Actions on pushes to `main` and on pull requests; see
+[`.github/workflows/test.yml`](.github/workflows/test.yml).
+
 ## License
 
-No license has been chosen yet.
+This project is MIT licensed; see [LICENSE](LICENSE).

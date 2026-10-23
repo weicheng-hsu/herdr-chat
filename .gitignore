@@ -11,3 +11,4 @@ dist/
 state/
 runs/
 *.sock
+.serena/

@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=69"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -7,6 +7,7 @@ name = "herdr-chat"
 version = "0.1.0"
 description = "A shared group chat for one Codex and one Claude Code session in Herdr"
 readme = "README.md"
+license = "MIT"
 requires-python = ">=3.11"
 # Versions used by the tested implementation; markdown-it-py is imported directly (also a Rich dependency).
 dependencies = [
@@ -14,6 +15,9 @@ dependencies = [
   "rich==14.3.4",
   "markdown-it-py==4.2.0",
 ]
+
+[project.urls]
+Repository = "https://github.com/weicheng-hsu/herdr-chat"
 
 [project.scripts]
 herdr-chat = "herdr_group_chat:cli"
