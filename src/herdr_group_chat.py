@@ -1674,6 +1674,18 @@ def cmd_ui(args):
     return 0
 
 
+def cmd_open(args):
+    """`ui` subcommand: run the coordinator of a group of this directory (start runs it there for --codex/--claude)."""
+    try:
+        cfg = json.loads((Path(args.state_dir) / "config.json").read_text())
+    except (OSError, ValueError) as e:
+        sys.exit(f"cannot read {args.state_dir}/config.json ({e}); nothing changed")
+    problem = dir_problem(cfg, os.getcwd())
+    if problem:
+        sys.exit(f"cannot open {args.state_dir}: {problem}; nothing changed")
+    return cmd_ui(args)
+
+
 def cmd_submit(args):
     if args.file:
         body = Path(args.file).read_text(encoding="utf-8")
@@ -1823,6 +1835,22 @@ def own_pane(cfg, caller, tab_id):
         caller, tab_id, os.environ.get("HERDR_SOCKET_PATH"))
 
 
+def group_dir(cfg):
+    """The canonical directory a saved group belongs to, or None: groups saved before directory history recorded
+    none, and an empty, relative or non-text value names none (never inferred from the caller)."""
+    cwd = cfg.get("cwd") if isinstance(cfg, dict) else None
+    return os.path.realpath(cwd) if isinstance(cwd, str) and os.path.isabs(cwd) else None
+
+
+def dir_problem(cfg, here):
+    """None if the saved group belongs to the canonical directory here (exactly, not a parent or child); else why."""
+    d = group_dir(cfg)
+    if d is None:
+        return f"it records no directory (saved before directory history), so it cannot be shown to belong to {here}"
+    if d != here:
+        return f"it belongs to {d}, not this directory {here}"
+
+
 def group_problem(herdr, state, cfg, caller, tab_id):
     """Read-only, before any lock: None if this caller pane is the saved group's shared pane in the same tab and
     Herdr server and both saved panes host their recorded native sessions; "" if both agent panes are gone (an
@@ -1832,9 +1860,9 @@ def group_problem(herdr, state, cfg, caller, tab_id):
     return panes_problem(herdr, state, cfg)
 
 
-def saved_group(herdr, caller, tab_id):
-    """The one saved group (default state root) this caller pane can recover, None if there is none; exits on any
-    ambiguous or mismatching candidate, before anything changed."""
+def saved_group(herdr, caller, tab_id, here):
+    """The one saved group (default state root) this caller pane can recover in directory here, None if there is none;
+    exits on any ambiguous or mismatching candidate, before anything changed."""
     found, refused = [], []
     for path in sorted((Path.home() / ".local/state/herdr-group-chat").glob("*/config.json")):
         try:
@@ -1844,6 +1872,8 @@ def saved_group(herdr, caller, tab_id):
         if not own_pane(cfg, caller, tab_id):
             continue  # another pane's, tab's or Herdr server's group
         problem = group_problem(herdr, path.parent, cfg, caller, tab_id)
+        if problem is None:  # recoverable here only in its own directory; an ended group stays skipped
+            problem = dir_problem(cfg, here)
         if problem is None:
             found.append(str(path.parent))
         elif problem:
@@ -1851,7 +1881,8 @@ def saved_group(herdr, caller, tab_id):
     if len(found) + len(refused) > 1 or refused:
         sys.exit("saved group(s) for this pane cannot be recovered automatically: " + "; ".join(found + refused)
                  + ". Nothing changed. " + ("Choose one with `herdr-chat recover --state-dir PATH`" if found else
-                                            "Recovery needs both agent panes to host their recorded native sessions")
+                                            "Recovery needs the group's own directory and both agent panes to host "
+                                            "their recorded native sessions")
                  + ", or start a new group from a new empty tab")
     return found[0] if found else None
 
@@ -1868,6 +1899,9 @@ def cmd_recover(args):
         cfg = json.loads((Path(args.state_dir) / "config.json").read_text())
     except (OSError, ValueError) as e:
         sys.exit(f"cannot read {args.state_dir}/config.json ({e}); nothing changed")
+    problem = dir_problem(cfg, os.getcwd())
+    if problem:
+        sys.exit(f"cannot recover {args.state_dir}: {problem}; nothing changed")
     problem = group_problem(herdr, args.state_dir, cfg, caller, pane["tab_id"])
     if problem is not None:
         sys.exit(f"cannot recover {args.state_dir}: {problem or 'both agent panes are gone'}; nothing changed")
@@ -1960,24 +1994,33 @@ def fresh_argv(args):
     return argv
 
 
-def saved_groups():
-    """(state, messages) of each saved group with a public conversation (default state root), newest first."""
-    groups = []
+def saved_groups(here):
+    """(state, messages) of each saved group of directory here with a public conversation (default state root),
+    newest first, and how many saved groups record no directory. Other groups' transcripts are not read."""
+    groups, unknown = [], 0
     for path in (Path.home() / ".local/state/herdr-group-chat").glob("*/config.json"):
         try:
+            d = group_dir(json.loads(path.read_text()))
+            if d != here:
+                unknown += d is None
+                continue
             msgs = [json.loads(l) for l in (path.parent / "transcript.jsonl").read_text().splitlines()]
         except (OSError, ValueError):
             continue
         if msgs:
             groups.append((str(path.parent), msgs))
-    return sorted(groups, key=lambda g: (g[1][-1]["time"], g[0]), reverse=True)
+    return sorted(groups, key=lambda g: (g[1][-1]["time"], g[0]), reverse=True), unknown
 
 
-def choose_group():
-    """The saved group the user selects from a short list, or None (cancelled); exits on an invalid choice."""
-    groups = saved_groups()
+def choose_group(here):
+    """The saved group of directory here the user selects from a short list, or None (cancelled); exits on an
+    invalid choice."""
+    groups, unknown = saved_groups(here)
+    if unknown:
+        print(f"{unknown} saved group(s) record no directory (saved before directory history); they are not listed "
+              "and cannot be resumed")
     if not groups:
-        sys.exit("no saved group conversation under ~/.local/state/herdr-group-chat; nothing changed")
+        sys.exit(f"no saved group conversation for {here} under ~/.local/state/herdr-group-chat; nothing changed")
     for i, (state, msgs) in enumerate(groups, 1):
         first = msgs[0]["text"].strip().split("\n")[0]
         print(f"{i:>3}. {time.strftime('%Y-%m-%d %H:%M', time.localtime(msgs[0]['time']))}  {len(msgs):>4} messages  "
@@ -2017,7 +2060,7 @@ def reopen(herdr, state, cfg, sessions, caller, pane, lock, args):
               "resuming without overrides: each native CLI restores what its session stored (observed: the model; "
               "Codex also its effort) and takes everything else from its current configuration", flush=True)
     panes, infos, bottom, tab_id = launch_fresh(herdr, argparse.Namespace(
-        ratio=0.75, cwd=cfg.get("cwd", os.getcwd()), startup_timeout_ms=args.startup_timeout_ms),
+        ratio=0.75, cwd=group_dir(cfg), startup_timeout_ms=args.startup_timeout_ms),
         caller, pane, argv, sessions)
     ident = {a: identity(infos[a]) for a in AGENTS}
     if ident["codex"]["session"] is None:  # see observed(): verified only once Herdr reports it
@@ -2034,13 +2077,16 @@ def reopen(herdr, state, cfg, sessions, caller, pane, lock, args):
 def cmd_resume(args):
     herdr = Herdr(resolve_herdr(args.herdr_bin))
     caller, pane = caller_pane(herdr)
-    state = args.state_dir or choose_group()
+    state = args.state_dir or choose_group(os.getcwd())
     if state is None:
         return 0
     try:
         cfg = json.loads((Path(state) / "config.json").read_text())
     except (OSError, ValueError) as e:
         sys.exit(f"cannot read {state}/config.json ({e}); nothing changed")
+    problem = dir_problem(cfg, os.getcwd())
+    if problem:
+        sys.exit(f"cannot resume {state}: {problem}; nothing changed")
     lock = take_lock(state)
     if lock is None:
         sys.exit(f"{state} is already open: its coordinator holds coordinator.lock (shared pane {cfg.get('bottom_pane')}"
@@ -2062,11 +2108,12 @@ def cmd_resume(args):
 def cmd_start(args):
     if bool(args.codex) != bool(args.claude):
         sys.exit("pass both --codex and --claude to bind existing panes, or neither for a fresh launch; nothing changed")
+    args.cwd = os.path.realpath(args.cwd)  # the group's directory: canonical, as its history is listed
     herdr = Herdr(resolve_herdr(args.herdr_bin))
     if not args.codex:
         caller, pane = caller_pane(herdr)
         # Bare start in a saved group's shared pane (e.g. after Herdr resumed its sessions) recovers that group.
-        if not args.state_dir and (found := saved_group(herdr, caller, pane["tab_id"])):
+        if not args.state_dir and (found := saved_group(herdr, caller, pane["tab_id"], args.cwd)):
             return recover(found)
     state = new_state_dir(args.state_dir)
     # The UI runs in this pane (fresh launch) or in a new terminal pane (--codex/--claude).
@@ -2150,7 +2197,7 @@ def main(argv=None):
     c.add_argument("--socket", required=True)
     c.add_argument("line", nargs="+")
     args = p.parse_args(argv)
-    return {"start": cmd_start, "ui": cmd_ui, "recover": cmd_recover, "resume": cmd_resume, "submit": cmd_submit, "claim": cmd_claim, "ack": cmd_claim, "rejoin": cmd_claim, "ctl": cmd_ctl}[args.cmd](args)
+    return {"start": cmd_start, "ui": cmd_open, "recover": cmd_recover, "resume": cmd_resume, "submit": cmd_submit, "claim": cmd_claim, "ack": cmd_claim, "rejoin": cmd_claim, "ctl": cmd_ctl}[args.cmd](args)
 
 
 def cli():

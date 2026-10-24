@@ -147,9 +147,13 @@ another key is read as Alt+key.
 
 ### Saved groups and recovery
 
-- `herdr-chat resume` lists saved groups and continues the chosen one: in its own shared pane, or, once its
-  agent panes are gone, from an empty tab by natively resuming the same recorded Codex and Claude Code sessions
-  (`codex resume ID`, `claude --resume ID`) in the recorded working directory.
+- Each group belongs to one directory: the directory `herdr-chat` was started in, or `--cwd DIR`, recorded with
+  symlinks resolved. `herdr-chat resume` lists only the groups of the directory you run it in and continues the
+  chosen one: in its own shared pane, or, once its agent panes are gone, from an empty tab by natively resuming
+  the same recorded Codex and Claude Code sessions (`codex resume ID`, `claude --resume ID`) in that directory.
+  Symlinked paths to the same directory match; a parent, child or other checkout does not. `resume
+  --state-dir`, `recover` and bare `herdr-chat` recovery refuse a group of another directory, before showing
+  its history or changing anything.
 - After Herdr itself restores a group's native sessions (for example after a reboot), bare `herdr-chat` in
   the group's original bottom pane recovers it with its history and queue. Nothing is resent.
 - If a group created with `--allow-submit` is resumed from a different installation or virtual environment,
@@ -165,7 +169,10 @@ to the two agents, which send them to their model providers.
 
 The agents' private reasoning and tool logs stay only in their native Codex/Claude Code session files.
 Resuming a group therefore depends on those native sessions still existing and on the recorded project
-directory. Groups saved without a recorded working directory resume in the current directory.
+directory. Groups saved by earlier versions without a recorded directory (or with an empty or relative one) are
+left unchanged but are not listed and cannot be resumed or recovered, because the directory they belong to cannot
+be established; the list reports how many there are. Directory scoping only decides what `herdr-chat` shows and
+opens: the state files of every group remain readable by your user account.
 
 ## Known limitations
 

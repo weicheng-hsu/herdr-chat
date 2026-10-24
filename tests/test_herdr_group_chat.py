@@ -31,6 +31,7 @@ def put(path, text):
 SCRIPT = Path(importlib.util.find_spec("herdr_group_chat").origin).resolve()
 PANES = {"codex": "w9:p1", "claude": "w9:p2"}
 AGENT_ORDER = ("codex", "claude")
+ABSENT = object()  # a config key an older group never recorded
 
 # Fake Herdr: identities in agents.json, status per pane in status-*; `agent prompt --wait`
 # records the prompt, marks the pane working, and settles only when the test writes finish-*.
@@ -205,7 +206,7 @@ class Harness:
                "bottom_pane": "w9:p0", "tab_id": "w9:t1",
                "identity": {a: {"agent": a, "session": f"sess-{a}", "terminal_id": f"term-{a}",
                                 "workspace_id": "w9", "pgid": 100} for a in PANES},
-               "first": "codex", "turn_timeout_ms": turn_timeout_ms}
+               "first": "codex", "turn_timeout_ms": turn_timeout_ms, "cwd": os.getcwd()}
         if owned:  # fresh launch (native_argv recorded); Codex reports no session id before its first turn
             cfg["native_argv"] = {"codex": ["--model", "m"], "claude": ["--model", "m"]}
             cfg["identity"]["codex"]["session"] = None
@@ -2006,7 +2007,7 @@ class StartTests(unittest.TestCase):
         self.assertEqual(sorted(kinds), ["claude", "codex"])  # no retry, nothing closed
         self.assertFalse(any(c[:2] in (["pane", "close"], ["pane", "focus"]) for c in self.mutations()))
 
-    def saved(self, name, panes=("w9:a", "w9:b"), codex_session="sess-codex"):
+    def saved(self, name, panes=("w9:a", "w9:b"), codex_session="sess-codex", cwd=None):
         """A saved group whose shared pane is the caller w9:p0, under the default state root of a test HOME.
         Codex's session id is null in config.json and was recorded later in progress.json (a real fresh launch)."""
         state = self.d / "home/.local/state/herdr-group-chat" / name
@@ -2016,7 +2017,8 @@ class StartTests(unittest.TestCase):
         (state / "config.json").write_text(json.dumps({
             "herdr_bin": str(self.herdr), "herdr_socket": "/fake/herdr.sock", "socket": str(state / "s"),
             "panes": dict(zip(AGENT_ORDER, panes)), "bottom_pane": "w9:p0", "tab_id": "w9:t1", "identity": ident,
-            "native_argv": None, "turn_timeout_ms": 60000}))
+            "native_argv": None, "turn_timeout_ms": 60000,
+            **({} if cwd is ABSENT else {"cwd": str(self.d) if cwd is None else cwd})}))
         (state / "progress.json").write_text(json.dumps({"codex": {"session": codex_session, "seen": 1},
                                                          "claude": {"session": "sess-claude", "seen": 1}}))
         (state / "transcript.jsonl").write_text(json.dumps({"seq": 1, "time": 0, "author": "user", "text": "hi"}) + "\n")
@@ -2026,7 +2028,7 @@ class StartTests(unittest.TestCase):
         env = dict(os.environ, FAKE_HERDR_DIR=str(self.fake), FAKE_CWD=str(self.d), HERDR_ENV="1", HERDR_PANE_ID="w9:p0",
                    HOME=str(self.d / "home"), HERDR_SOCKET_PATH="/fake/herdr.sock")
         return subprocess.run([sys.executable, str(SCRIPT), *args, "--herdr-bin", str(self.herdr)], input="",
-                              capture_output=True, text=True, env=env, timeout=30)
+                              capture_output=True, text=True, env=env, timeout=30, cwd=self.d)
 
     def test_bare_start_recovers_only_a_unique_matching_saved_group(self):
         def resumed(claude_session="sess-claude"):  # Herdr resumed both sessions with new terminal/process ids
@@ -2044,7 +2046,10 @@ class StartTests(unittest.TestCase):
 
         cases = {"replaced Claude session": (lambda: (resumed("sess-other"), self.saved("g1")), "hosts"),
                  "Codex id never recorded": (lambda: (resumed(), self.saved("g1", codex_session=None)), "never recorded"),
-                 "two candidates": (lambda: (resumed(), self.saved("g1"), self.saved("g2")), "g2")}
+                 "another directory": (lambda: (resumed(), self.saved("g1", cwd=str(self.d / "other"))),
+                                       "other, not this directory /"),
+                 "no recorded directory": (lambda: (resumed(), self.saved("g1", cwd=ABSENT)), "records no directory"),
+                 "two candidates": (lambda: (resumed(), self.saved("g1"), self.saved("g2")), "g2")}  # kept for below
         for name, (setup, message) in cases.items():
             with self.subTest(name):
                 self.tearDown()
@@ -2082,20 +2087,25 @@ class StartTests(unittest.TestCase):
             self.assertEqual([e["kind"] for e in map(json.loads, (state / "events.jsonl").read_text().splitlines())
                               if e["kind"] in ("rebind", "ui_start")], ["rebind", "ui_start"])
             self.assertTrue(unchanged(ended))
-        with self.subTest("ended group only, empty tab: fresh launch"):
-            self.tearDown()
-            self.setUp()
-            self.saved("g0", panes=("w9:x", "w9:y"))
-            r = self.bare("start", "--cwd", str(self.d))
-            self.assertEqual(r.returncode, 0, r.stderr)
-            self.assertEqual(self.mutations()[0][:3], ["pane", "split", "w9:p0"])
+        for cwd in (None, "/nonexistent/other", ABSENT):  # an ended group never blocks, whatever its directory
+            with self.subTest("ended group only, empty tab: fresh launch", cwd=cwd if cwd is not ABSENT else "absent"):
+                self.tearDown()
+                self.setUp()
+                ended = self.saved("g0", panes=("w9:x", "w9:y"), cwd=cwd)
+                before = self.files(ended)
+                r = self.bare("start", "--cwd", str(self.d))
+                self.assertEqual(r.returncode, 0, r.stderr)
+                self.assertEqual(self.mutations()[0][:3], ["pane", "split", "w9:p0"])
+                self.assertNotIn("│ hi", r.stdout)  # the ended group's history is not shown
+                self.assertEqual(self.files(ended), before)
 
     HISTORY = [("user", f"u{i}") if i % 2 else ("codex", f"c{i}") for i in range(1, 12)] + [("claude", BODY)]
 
-    def group(self, name, last=100, codex_session="sess-codex", legacy=False):
-        """A group whose agent panes w9:a/w9:b (tab w9:t0) are gone, with 12 public messages; Codex's id was
-        recorded in progress.json only, as in a real fresh launch. legacy: the shape of an older group bound with
-        --codex/--claude: no native_argv, cwd or progress.json, Codex's id only in a session_learned event."""
+    def group(self, name, last=100, codex_session="sess-codex", legacy=False, cwd=None):
+        """A group of directory cwd (default: the test directory) whose agent panes w9:a/w9:b (tab w9:t0) are gone,
+        with 12 public messages; Codex's id was recorded in progress.json only, as in a real fresh launch. legacy: the
+        shape of an older group bound with --codex/--claude: no native_argv or progress.json, Codex's id only in a
+        session_learned event."""
         state = self.d / "home/.local/state/herdr-group-chat" / name
         state.mkdir(parents=True)
         ident = {a: {"agent": a, "session": None if a == "codex" else "sess-claude", "terminal_id": f"term-{a}-old",
@@ -2103,9 +2113,12 @@ class StartTests(unittest.TestCase):
         argv = {"codex": ["--model", "m", "-c", "model_reasoning_effort=low"], "claude": ["--model", "m", "--effort", "low"]}
         cfg = {"herdr_bin": str(self.herdr), "herdr_socket": "/fake/herdr.sock", "socket": str(state / "s"),
                "panes": {"codex": "w9:a", "claude": "w9:b"}, "bottom_pane": "w9:q0", "tab_id": "w9:t0",
-               "identity": ident, "native_argv": argv, "cwd": str(self.d), "turn_timeout_ms": 60000}
+               "identity": ident, "native_argv": argv, "cwd": str(self.d) if cwd is None else cwd,
+               "turn_timeout_ms": 60000}
+        if cwd is ABSENT:
+            del cfg["cwd"]
         if legacy:
-            del cfg["native_argv"], cfg["cwd"]
+            del cfg["native_argv"]
             if codex_session:
                 (state / "events.jsonl").write_text(json.dumps({"time": 1, "kind": "session_learned", "agent": "codex",
                                                                 "session": codex_session}) + "\n")
@@ -2157,7 +2170,8 @@ class StartTests(unittest.TestCase):
 
         def launch(*cmd, stdin=""):
             proc = subprocess.Popen([sys.executable, str(SCRIPT), *cmd, "--herdr-bin", str(self.herdr)], env=env,
-                                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+                                    cwd=self.d, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                    stderr=subprocess.STDOUT, text=True)
             proc.stdin.write(stdin)
             proc.stdin.flush()
             threading.Thread(target=lambda: out.extend(proc.stdout), daemon=True).start()
@@ -2315,6 +2329,79 @@ class StartTests(unittest.TestCase):
                 r = self.resume("", "--state-dir", str(state))
                 self.assertIn("was never recorded", r.stderr)
                 self.assertEqual((self.files(state), self.mutations()), (before, []))
+
+    def test_history_lists_only_groups_of_the_exact_invocation_directory(self):
+        """Symlinked aliases share a directory; a child, a prefix-sharing sibling or a group without a recorded
+        absolute directory is never listed, and its conversation text is never printed."""
+        here, link = self.d / "proj", self.d / "alias"
+        (here / "child").mkdir(parents=True)
+        link.symlink_to(here)
+        cwds = {"g-here": str(here), "g-link": str(link), "g-child": str(here / "child"), "g-sibling": f"{here}2",
+                "g-other": str(self.d), "g-absent": ABSENT, "g-empty": "", "g-relative": ".", "g-number": 7}
+        for i, (name, cwd) in enumerate(cwds.items()):
+            state = self.group(name, last=100 + i, cwd=cwd)
+            (state / "transcript.jsonl").write_text(json.dumps({"seq": 1, "time": 100 + i, "author": "user",
+                                                                "text": f"text of {name}"}) + "\n")
+        snapshot = {n: self.files(self.d / "home/.local/state/herdr-group-chat" / n) for n in cwds}
+        for cwd, listed in ((here, ["g-link", "g-here"]), (link, ["g-link", "g-here"]), (here / "child", ["g-child"])):
+            with self.subTest(cwd=cwd.name):
+                r = subprocess.run([sys.executable, str(SCRIPT), "resume", "--herdr-bin", str(self.herdr)], input="",
+                                   capture_output=True, text=True, env=self.env(), timeout=30, cwd=cwd)
+                self.assertEqual(r.returncode, 0, r.stderr)
+                self.assertEqual(re.findall(r"text of (\S+)", r.stdout), listed)
+                self.assertIn("4 saved group(s) record no directory", r.stdout)
+        r = subprocess.run([sys.executable, str(SCRIPT), "resume", "--herdr-bin", str(self.herdr)], input="",
+                           capture_output=True, text=True, env=self.env(), timeout=30, cwd=self.d / "home")
+        self.assertIn(f"no saved group conversation for {self.d / 'home'}", r.stderr)
+        self.assertNotIn("text of", r.stdout + r.stderr)
+        self.assertEqual(self.mutations(), [])
+        for n in cwds:
+            self.assertEqual(self.files(self.d / "home/.local/state/herdr-group-chat" / n), snapshot[n])
+
+    def test_explicit_open_of_another_or_unknown_directory_is_refused_before_any_change(self):
+        here = self.d / "proj"
+        (here / "child").mkdir(parents=True)
+        cases = {"another directory": (str(self.d), "belongs to"), "child": (str(here / "child"), "belongs to"),
+                 "prefix sibling": (f"{here}2", "belongs to"), "absent": (ABSENT, "records no directory"),
+                 "empty": ("", "records no directory"), "relative": (".", "records no directory"),
+                 "not text": (7, "records no directory")}
+        routes = itertools.product(cases.items(), ("resume", "recover", "ui"))
+        for i, ((name, (cwd, message)), route) in enumerate(routes):
+            with self.subTest(name, route=route):
+                state = self.group(f"g{i}", cwd=cwd)
+                before = self.files(state)
+                r = subprocess.run([sys.executable, str(SCRIPT), route, "--state-dir", str(state)]
+                                   + (["--herdr-bin", str(self.herdr)] if route != "ui" else []), input="",
+                                   capture_output=True, text=True, env=self.env(), timeout=30, cwd=here)
+                self.assertNotEqual(r.returncode, 0)
+                self.assertIn(message, r.stderr)
+                self.assertNotIn("u1", r.stdout + r.stderr)  # no history shown
+                self.assertEqual((self.files(state), self.mutations()), (before, []))
+                self.assertFalse((state / "coordinator.lock").exists())
+
+    def test_resume_from_a_symlinked_alias_reopens_the_same_sessions_in_the_canonical_directory(self):
+        alias = self.d / "alias"
+        alias.symlink_to(self.d)
+        state = self.group("g1")
+        r = subprocess.run([sys.executable, str(SCRIPT), "resume", "--state-dir", str(state), "--herdr-bin",
+                            str(self.herdr)], input="", capture_output=True, text=True, env=self.env(), timeout=30,
+                           cwd=alias)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("all 12 public messages above", r.stdout)
+        m = self.mutations()
+        self.assertEqual([c[c.index("--cwd") + 1] for c in m if c[:2] == ["pane", "split"]], [str(self.d)] * 2)
+        starts = {c[c.index("--kind") + 1]: c[c.index("--") + 1:][:2] for c in m if c[:2] == ["agent", "start"]}
+        self.assertEqual(starts, {"codex": ["resume", "sess-codex"], "claude": ["--resume", "sess-claude"]})
+        self.assertEqual(json.loads((state / "config.json").read_text())["cwd"], str(self.d))
+
+    def test_start_records_the_canonical_effective_directory(self):
+        alias = self.d / "alias"
+        alias.symlink_to(self.d)
+        r = self.start("--cwd", os.path.relpath(alias))  # relative to the invocation cwd, through a symlink
+        self.assertEqual(r.returncode, 0, r.stderr)
+        splits = [c for c in self.mutations() if c[:2] == ["pane", "split"]]
+        self.assertEqual([c[c.index("--cwd") + 1] for c in splits], [str(self.d)] * 2)
+        self.assertEqual(json.loads((self.state / "config.json").read_text())["cwd"], str(self.d))
 
     def test_legacy_binding_with_both_panes_still_works(self):
         agents = {p: {"agent": a, "agent_session": {"value": f"sess-{a}"}, "terminal_id": f"term-{a}",
